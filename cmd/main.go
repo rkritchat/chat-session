@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chat-session/internal/cache"
 	"chat-session/internal/config"
 	"chat-session/internal/repository"
 	"chat-session/internal/router"
@@ -14,11 +15,14 @@ func main() {
 	cfg := config.InitConfig()
 	defer cfg.Free()
 
+	//init cache
+	c := cache.NewCache(cfg.RDB)
+
 	//init repository
 	messageRepo := repository.NewMessage(cfg.DB)
 
 	//init service
-	s := session.NewService(messageRepo)
+	s := session.NewService(c, messageRepo)
 
 	//init router
 	r := router.InitRouter(s)

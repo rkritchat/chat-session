@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/caarlos0/env/v6"
+	"github.com/go-redis/redis/v8"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
@@ -15,6 +16,7 @@ import (
 
 type Cfg struct {
 	DB  *sql.DB
+	RDB *redis.Client
 	Env Env
 }
 
@@ -27,6 +29,8 @@ type Env struct {
 	MySqlMaxOpenCon     int    `env:"MYSQL_MAX_OPEN_CON"`
 	MySqlMaxIdleCon     int    `env:"MYSQL_MAX_IDLE_CON"`
 	MySqlConMaxLifetime int    `env:"MYSQL_CON_MAX_LIFETIME"`
+	RedisAddr           string `env:"REDIS_ADDR"`
+	RedisTTL            int    `env:"REDIS_TTL"`
 }
 
 func InitConfig() Cfg {
@@ -35,6 +39,7 @@ func InitConfig() Cfg {
 	initLogs()
 	return Cfg{
 		DB:  initDBCon(localEnv),
+		RDB: initRDB(localEnv),
 		Env: localEnv,
 	}
 }
@@ -98,6 +103,19 @@ func initDBCon(env Env) *sql.DB {
 	}
 
 	return conn
+}
+
+func initRDB(env Env) *redis.Client {
+	fmt.Printf("start connect redis: %v\n", env.RedisAddr)
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     env.RedisAddr,
+		Password: "",
+		DB:       0,
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		panic(err)
+	}
+	return rdb
 }
 
 func initLogs() {
