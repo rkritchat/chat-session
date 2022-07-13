@@ -1,6 +1,7 @@
 package session
 
 import (
+	"chat-session/internal/repository"
 	"fmt"
 	"github.com/go-chi/chi/v5"
 	"github.com/gobwas/ws"
@@ -18,10 +19,13 @@ type Service interface {
 }
 
 type service struct {
+	messageRepo repository.Message
 }
 
-func NewService() Service {
-	return &service{}
+func NewService(messageRepo repository.Message) Service {
+	return &service{
+		messageRepo: messageRepo,
+	}
 }
 
 type Message struct {
