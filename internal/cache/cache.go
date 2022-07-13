@@ -18,9 +18,10 @@ type cache struct {
 	env config.Env
 }
 
-func NewCache(rdb *redis.Client) Cache {
+func NewCache(rdb *redis.Client, env config.Env) Cache {
 	return &cache{
 		rdb: rdb,
+		env: env,
 	}
 }
 

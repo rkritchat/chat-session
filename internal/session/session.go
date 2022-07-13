@@ -18,6 +18,11 @@ import (
 const (
 	cannotConnect = "cannot connect"
 )
+const (
+	statusOnline  = "online"
+	statusOffline = "offline"
+	online        = "%s-online"
+)
 
 type Service interface {
 	Online(w http.ResponseWriter, r *http.Request)
@@ -42,14 +47,19 @@ func (s service) Online(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//setup status to online
+	s.setStatus(ss, statusOnline)
+
 	//update missed message
 	s.updateMsg(ss)
+
+	//read message from client
 	s.readMessage(ss)
 }
 
 func (s service) updateMsg(ss *SsModel) {
 	//get update flag from redis first. if key found then it means need to update otherwise do nothing.
-	_, err := s.cache.Get(ss.Username)
+	_, err := s.cache.Get(ss.Username) //TODO set cache when message coming but user offline!
 	if err == redis.Nil {
 		//no need no new message
 		return
@@ -100,8 +110,8 @@ func (s service) readMessage(ss *SsModel) {
 		if err != nil {
 			switch err.(type) {
 			case wsutil.ClosedError:
-				//check if user disconnect
-				zap.S().Infof("%s is offline", ss.Username)
+				//remove online status
+				s.setStatus(ss, statusOffline)
 			default:
 				zap.S().Error("cannot read message from client: %v", err)
 			}
@@ -127,7 +137,6 @@ type SsModel struct {
 
 func initConnection(w http.ResponseWriter, r *http.Request) (*SsModel, error) {
 	username := chi.URLParam(r, "username")
-	zap.S().Infof("%s is now online", username)
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
 		return nil, err
@@ -137,4 +146,31 @@ func initConnection(w http.ResponseWriter, r *http.Request) (*SsModel, error) {
 		Conn:     conn,
 		Username: username,
 	}, nil
+}
+
+func (s service) setStatus(ss *SsModel, status string) {
+	//check if user disconnect
+	msg := fmt.Sprintf(online, ss.Username)
+
+	//turned status to online
+	if status == statusOnline {
+		zap.S().Infof("%s is now online", ss.Username)
+		err := s.cache.Set(msg, msg)
+		if err != nil {
+			zap.S().Error("s.cache.Set: %v", err)
+		}
+		return
+	}
+
+	//turned status to offline
+	if status == statusOffline {
+		zap.S().Infof("%s is offline", ss.Username)
+		err := s.cache.Del(msg)
+		if err != nil {
+			zap.S().Error("s.cache.Del: %v", err)
+		}
+		return
+	}
+
+	zap.S().Error("invalid status")
 }

@@ -16,7 +16,7 @@ func main() {
 	defer cfg.Free()
 
 	//init cache
-	c := cache.NewCache(cfg.RDB)
+	c := cache.NewCache(cfg.RDB, cfg.Env)
 
 	//init repository
 	messageRepo := repository.NewMessage(cfg.DB)
