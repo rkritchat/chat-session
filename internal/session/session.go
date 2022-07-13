@@ -4,6 +4,7 @@ import (
 	"chat-session/internal/cache"
 	"chat-session/internal/model"
 	"chat-session/internal/repository"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/go-chi/chi/v5"
@@ -122,6 +123,9 @@ func (s service) getUndeliveredMsg(ss *SsModel) {
 }
 
 func (s service) readClientMsg(ss *SsModel) {
+	var endChan chan bool
+	//subscribe redis channel until connection close
+	go s.subscribeMsg(ss, endChan)
 	for {
 		data, _, err := wsutil.ReadClientData(ss.Conn)
 		if err != nil {
@@ -133,21 +137,15 @@ func (s service) readClientMsg(ss *SsModel) {
 				zap.S().Error("cannot read message from client: %v", err)
 			}
 			_ = ss.Conn.Close()
+			endChan <- true
 			break
 		}
 
-		go s.sendMsg(data)
-		////return message back if success
-		//err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, data)
-		//if err != nil {
-		//	_ = ss.Conn.Close()
-		//	return
-		//}
-		//fmt.Printf("%s\n", data)
+		go s.forwardMsgToReceiver(data)
 	}
 }
 
-func (s service) sendMsg(data []byte) {
+func (s service) forwardMsgToReceiver(data []byte) {
 	//check if target user is now online, if yes publish message into redis pub/sub and then insert the msg into db with is_read is one (read)
 	//make sure that message delivered to target otherwise system should insert data into database instead
 	var reqMsg model.ChatMessage
@@ -163,7 +161,7 @@ func (s service) sendMsg(data []byte) {
 	if err == nil {
 		//target user is not online then publish message into channel
 		to := fmt.Sprintf(rdbPublish, reqMsg.ReceiverId)
-		r, err = s.cache.Pub(to, reqMsg.Msg).Result()
+		r, err = s.cache.Pub(to, string(data)).Result()
 		if err != nil {
 			zap.S().Error("s.cache.Pub: %v", err)
 			goto offline
@@ -209,7 +207,6 @@ offline:
 
 type SsModel struct {
 	Conn     net.Conn
-	Op       *ws.OpCode
 	Username string `json:"username"`
 }
 
@@ -251,4 +248,43 @@ func (s service) setStatus(ss *SsModel, status string) {
 	}
 
 	zap.S().Error("invalid status")
+}
+
+func (s service) subscribeMsg(ss *SsModel, endChan chan bool) {
+	run := true
+	for run {
+		select {
+		case <-endChan:
+			//TODO fix bug on stop subscribe when client disconnect, it seem like not working right now
+			zap.S().Infof("%s stop subscribe message", ss.Username)
+			run = false
+		default:
+			msg, err := s.cache.Sub(fmt.Sprintf(rdbPublish, ss.Username)).ReceiveMessage(context.Background())
+			if err != nil {
+				zap.S().Errorf("s.cache.Sub: %v", err)
+				continue
+			}
+
+			//unmarshal message and
+			var m model.ChatMessage
+			var n = time.Now()
+			err = json.Unmarshal([]byte(msg.Payload), &m)
+			if err != nil {
+				zap.S().Errorf("json.Unmarshal: %v", err)
+				continue
+			}
+			m.SendDtm = &n
+
+			//return message back if success
+			j, _ := json.Marshal(&m)
+			err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, j)
+			if err != nil {
+				_ = ss.Conn.Close()
+				return
+			}
+
+			//TODO insert data into chat_message db by using goroutine
+		}
+	}
+
 }
