@@ -50,14 +50,14 @@ func (s service) Online(w http.ResponseWriter, r *http.Request) {
 	//setup status to online
 	s.setStatus(ss, statusOnline)
 
-	//update missed message
-	s.updateMsg(ss)
+	//get undelivered message while user offline
+	s.getUndeliveredMsg(ss)
 
 	//read message from client
 	s.readMessage(ss)
 }
 
-func (s service) updateMsg(ss *SsModel) {
+func (s service) getUndeliveredMsg(ss *SsModel) {
 	//get update flag from redis first. if key found then it means need to update otherwise do nothing.
 	_, err := s.cache.Get(ss.Username) //TODO set cache when message coming but user offline!
 	if err == redis.Nil {
@@ -77,6 +77,7 @@ func (s service) updateMsg(ss *SsModel) {
 	}
 
 	//send all message to client
+	var ok []int64
 	for _, entity := range entities {
 		tmp := model.ReceiveMessage{
 			From:    entity.SenderId, //from whom?
@@ -94,6 +95,16 @@ func (s service) updateMsg(ss *SsModel) {
 		if err != nil {
 			zap.S().Error("wsutil.WriteServerMessage: %v", err)
 			break
+		}
+		ok = append(ok, entity.Id)
+	}
+
+	if len(ok) > 0 {
+		//update undelivered message to read when send to client successfully
+		err = s.messageRepo.UpdateIsRead(ok)
+		if err != nil {
+			zap.S().Errorf("s.messageRepo.UpdateIsRead: %v", err)
+			return
 		}
 	}
 
@@ -164,7 +175,7 @@ func (s service) setStatus(ss *SsModel, status string) {
 
 	//turned status to offline
 	if status == statusOffline {
-		zap.S().Infof("%s is offline", ss.Username)
+		zap.S().Infof("%s is now offline", ss.Username)
 		err := s.cache.Del(msg)
 		if err != nil {
 			zap.S().Error("s.cache.Del: %v", err)

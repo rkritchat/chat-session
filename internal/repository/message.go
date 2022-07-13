@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type MessageEntity struct {
 type Message interface {
 	Create(entity MessageEntity) error
 	FindNewMsgByReceiverId(receiverId string) ([]MessageEntity, error)
+	UpdateIsRead(ids []int64) error
 }
 
 type message struct {
@@ -40,15 +42,18 @@ func (repo message) Create(entity MessageEntity) error {
 	if err != nil {
 		return err
 	}
+	defer stmt.Close()
+
 	_, err = stmt.Exec(entity.ReceiverId, entity.SenderId, entity.Message, entity.IsRead, entity.SendDtm, entity.ReadDtm)
 	return err
 }
 
 func (repo message) FindNewMsgByReceiverId(receiverId string) ([]MessageEntity, error) {
-	stmt, err := repo.db.Prepare(fmt.Sprintf("SELECT receiver_id, sender_id, msg, send_dtm FROM %s WHERE receiver_id = ? AND is_read = 0", repo.tableName))
+	stmt, err := repo.db.Prepare(fmt.Sprintf("SELECT id, receiver_id, sender_id, msg, send_dtm FROM %s WHERE receiver_id = ? AND is_read = 0", repo.tableName))
 	if err != nil {
 		return nil, err
 	}
+	defer stmt.Close()
 
 	r, err := stmt.Query(receiverId)
 	if err != nil {
@@ -59,7 +64,7 @@ func (repo message) FindNewMsgByReceiverId(receiverId string) ([]MessageEntity, 
 	for r.Next() {
 		var tmp MessageEntity
 		var sendDtm sql.NullTime
-		err = r.Scan(&tmp.ReceiverId, &tmp.SenderId, &tmp.Message, &sendDtm)
+		err = r.Scan(&tmp.Id, &tmp.ReceiverId, &tmp.SenderId, &tmp.Message, &sendDtm)
 		if err != nil {
 			return nil, err
 		}
@@ -70,6 +75,21 @@ func (repo message) FindNewMsgByReceiverId(receiverId string) ([]MessageEntity, 
 		entities = append(entities, tmp)
 	}
 	return entities, nil
+}
+
+func (repo message) UpdateIsRead(ids []int64) error {
+	var params []string
+	for _, id := range ids {
+		params = append(params, fmt.Sprintf("'%v'", id))
+	}
+	query := fmt.Sprintf("UPDATE %s SET is_read = 1, read_dtm = ? WHERE id IN (%s)", repo.tableName, strings.Join(params, ","))
+	stmt, err := repo.db.Prepare(query)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	_, err = stmt.Exec(time.Now())
+	return err
 }
 
 func (repo *message) initTable() {
