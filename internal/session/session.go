@@ -13,15 +13,20 @@ import (
 	"go.uber.org/zap"
 	"net"
 	"net/http"
+	"time"
 )
 
 const (
 	cannotConnect = "cannot connect"
 )
 const (
+	rdbOnline      = "%s-online"
+	rdbPublish     = "%s-channel"
+	rdbUndelivered = "%s-undelivered"
+)
+const (
 	statusOnline  = "online"
 	statusOffline = "offline"
-	online        = "%s-online"
 )
 
 type Service interface {
@@ -54,12 +59,12 @@ func (s service) Online(w http.ResponseWriter, r *http.Request) {
 	s.getUndeliveredMsg(ss)
 
 	//read message from client
-	s.readMessage(ss)
+	s.readClientMsg(ss)
 }
 
 func (s service) getUndeliveredMsg(ss *SsModel) {
 	//get update flag from redis first. if key found then it means need to update otherwise do nothing.
-	_, err := s.cache.Get(ss.Username) //TODO set cache when message coming but user offline!
+	_, err := s.cache.Get(fmt.Sprintf(rdbUndelivered, ss.Username))
 	if err == redis.Nil {
 		//no need no new message
 		return
@@ -79,10 +84,11 @@ func (s service) getUndeliveredMsg(ss *SsModel) {
 	//send all message to client
 	var ok []int64
 	for _, entity := range entities {
-		tmp := model.ReceiveMessage{
-			From:    entity.SenderId, //from whom?
-			Msg:     entity.Message,  //message
-			SendDtm: entity.SendDtm,  //when?
+		tmp := model.ChatMessage{
+			ReceiverId: entity.ReceiverId, //to whom?
+			SenderId:   entity.SenderId,   //from whom?
+			Msg:        entity.Message,    //message
+			SendDtm:    entity.SendDtm,    //when?
 		}
 		j, err := json.Marshal(&tmp)
 		if err != nil {
@@ -115,7 +121,7 @@ func (s service) getUndeliveredMsg(ss *SsModel) {
 	}
 }
 
-func (s service) readMessage(ss *SsModel) {
+func (s service) readClientMsg(ss *SsModel) {
 	for {
 		data, _, err := wsutil.ReadClientData(ss.Conn)
 		if err != nil {
@@ -130,13 +136,74 @@ func (s service) readMessage(ss *SsModel) {
 			break
 		}
 
-		//return message back if success
-		err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, data)
+		go s.sendMsg(data)
+		////return message back if success
+		//err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, data)
+		//if err != nil {
+		//	_ = ss.Conn.Close()
+		//	return
+		//}
+		//fmt.Printf("%s\n", data)
+	}
+}
+
+func (s service) sendMsg(data []byte) {
+	//check if target user is now online, if yes publish message into redis pub/sub and then insert the msg into db with is_read is one (read)
+	//make sure that message delivered to target otherwise system should insert data into database instead
+	var reqMsg model.ChatMessage
+	err := json.Unmarshal(data, &reqMsg)
+	if err != nil {
+		zap.S().Errorf("invalid request json format: %v", err)
+		return
+	}
+
+	//check if target user online
+	var r int64
+	_, err = s.cache.Get(fmt.Sprintf(rdbOnline, reqMsg.ReceiverId))
+	if err == nil {
+		//target user is not online then publish message into channel
+		to := fmt.Sprintf(rdbPublish, reqMsg.ReceiverId)
+		r, err = s.cache.Pub(to, reqMsg.Msg).Result()
 		if err != nil {
-			_ = ss.Conn.Close()
-			return
+			zap.S().Error("s.cache.Pub: %v", err)
+			goto offline
 		}
-		fmt.Printf("%s\n", data)
+		if r == 0 {
+			zap.S().Infof("not found %s then insert chat-message into database", to)
+			goto offline
+		}
+		return
+	}
+
+	//no cache found
+	if err == redis.Nil {
+		zap.S().Infof("%s is not online then insert chat-message into database", reqMsg.ReceiverId)
+		goto offline
+	}
+
+	//err while get cache
+	if err != nil {
+		zap.S().Error("error while get user status then insert chat-message into database")
+		goto offline
+	}
+
+offline:
+	n := time.Now()
+	err = s.messageRepo.Create(repository.MessageEntity{
+		ReceiverId: reqMsg.ReceiverId,
+		SenderId:   reqMsg.SenderId,
+		Message:    reqMsg.Msg,
+		IsRead:     false,
+		SendDtm:    &n,
+	})
+	if err != nil {
+		zap.S().Errorf("s.messageRepo.Create: %v", err)
+	}
+
+	//set
+	err = s.cache.Set(fmt.Sprintf(rdbUndelivered, reqMsg.ReceiverId), time.Now().Format(time.RFC3339), 24*time.Hour)
+	if err != nil {
+		zap.S().Errorf("s.cache.Set: %v", err)
 	}
 }
 
@@ -161,12 +228,12 @@ func initConnection(w http.ResponseWriter, r *http.Request) (*SsModel, error) {
 
 func (s service) setStatus(ss *SsModel, status string) {
 	//check if user disconnect
-	msg := fmt.Sprintf(online, ss.Username)
+	msg := fmt.Sprintf(rdbOnline, ss.Username)
 
 	//turned status to online
 	if status == statusOnline {
 		zap.S().Infof("%s is now online", ss.Username)
-		err := s.cache.Set(msg, msg)
+		err := s.cache.Set(msg, msg, 24*time.Hour)
 		if err != nil {
 			zap.S().Error("s.cache.Set: %v", err)
 		}

@@ -38,7 +38,7 @@ func NewMessage(db *sql.DB) Message {
 }
 
 func (repo message) Create(entity MessageEntity) error {
-	stmt, err := repo.db.Prepare(fmt.Sprintf("INSERT INTO %s (receiver_id, sender_id, msg, is_read, send_dtm, read_dtm", repo.tableName))
+	stmt, err := repo.db.Prepare(fmt.Sprintf("INSERT INTO %s (receiver_id, sender_id, msg, is_read, send_dtm, read_dtm) VALUES (?, ?, ?, ?, ?, ?)", repo.tableName))
 	if err != nil {
 		return err
 	}

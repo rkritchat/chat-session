@@ -8,9 +8,11 @@ import (
 )
 
 type Cache interface {
-	Set(key, val string) error
+	Set(key, val string, ttl ...time.Duration) error
 	Get(key string) (string, error)
 	Del(key string) error
+	Pub(channel, msg string) *redis.IntCmd
+	Sub(channel string) *redis.PubSub
 }
 
 type cache struct {
@@ -25,9 +27,12 @@ func NewCache(rdb *redis.Client, env config.Env) Cache {
 	}
 }
 
-func (c cache) Set(key, val string) error {
-	ttl := time.Duration(c.env.RedisTTL) * time.Millisecond
-	_, err := c.rdb.SetEX(context.Background(), key, val, ttl).Result()
+func (c cache) Set(key, val string, ttl ...time.Duration) error {
+	exp := time.Duration(c.env.RedisTTL) * time.Millisecond
+	if len(ttl) > 0 {
+		exp = ttl[0]
+	}
+	_, err := c.rdb.SetEX(context.Background(), key, val, exp).Result()
 	return err
 }
 
@@ -38,4 +43,12 @@ func (c cache) Get(key string) (string, error) {
 func (c cache) Del(key string) error {
 	_, err := c.rdb.Del(context.Background(), key).Result()
 	return err
+}
+
+func (c cache) Pub(channel, msg string) *redis.IntCmd {
+	return c.rdb.Publish(context.Background(), channel, msg)
+}
+
+func (c cache) Sub(channel string) *redis.PubSub {
+	return c.rdb.Subscribe(context.Background(), channel)
 }
