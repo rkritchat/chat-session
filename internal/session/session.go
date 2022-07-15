@@ -123,26 +123,30 @@ func (s service) getUndeliveredMsg(ss *SsModel) {
 }
 
 func (s service) readClientMsg(ss *SsModel) {
-	var endChan chan bool
-	//subscribe redis channel until connection close
-	go s.subscribeMsg(ss, endChan)
-	for {
-		data, _, err := wsutil.ReadClientData(ss.Conn)
-		if err != nil {
-			switch err.(type) {
-			case wsutil.ClosedError:
-				//remove online status
-				s.setStatus(ss, statusOffline)
-			default:
-				zap.S().Error("cannot read message from client: %v", err)
+	var endChan = make(chan bool)
+	defer close(endChan)
+	go func() {
+		for {
+			data, _, err := wsutil.ReadClientData(ss.Conn)
+			if err != nil {
+				switch err.(type) {
+				case wsutil.ClosedError:
+					//remove online status
+					s.setStatus(ss, statusOffline)
+				default:
+					zap.S().Error("cannot read message from client: %v", err)
+				}
+				endChan <- true
+				_ = ss.Conn.Close()
+				break
 			}
-			_ = ss.Conn.Close()
-			endChan <- true
-			break
-		}
 
-		go s.forwardMsgToReceiver(data)
-	}
+			go s.forwardMsgToReceiver(data)
+		}
+	}()
+
+	//subscribe redis channel until connection close
+	s.subscribeMsg(ss, endChan)
 }
 
 func (s service) forwardMsgToReceiver(data []byte) {
@@ -186,17 +190,7 @@ func (s service) forwardMsgToReceiver(data []byte) {
 	}
 
 offline:
-	n := time.Now()
-	err = s.messageRepo.Create(repository.MessageEntity{
-		ReceiverId: reqMsg.ReceiverId,
-		SenderId:   reqMsg.SenderId,
-		Message:    reqMsg.Msg,
-		IsRead:     false,
-		SendDtm:    &n,
-	})
-	if err != nil {
-		zap.S().Errorf("s.messageRepo.Create: %v", err)
-	}
+	s.saveMsg(reqMsg, time.Now(), false)
 
 	//set
 	err = s.cache.Set(fmt.Sprintf(rdbUndelivered, reqMsg.ReceiverId), time.Now().Format(time.RFC3339), 24*time.Hour)
@@ -252,39 +246,69 @@ func (s service) setStatus(ss *SsModel, status string) {
 
 func (s service) subscribeMsg(ss *SsModel, endChan chan bool) {
 	run := true
+	ps := s.cache.Sub(fmt.Sprintf(rdbPublish, ss.Username))
 	for run {
 		select {
 		case <-endChan:
-			//TODO fix bug on stop subscribe when client disconnect, it seem like not working right now
 			zap.S().Infof("%s stop subscribe message", ss.Username)
 			run = false
 		default:
-			msg, err := s.cache.Sub(fmt.Sprintf(rdbPublish, ss.Username)).ReceiveMessage(context.Background())
+			msg, err := ps.ReceiveTimeout(context.Background(), time.Second)
 			if err != nil {
-				zap.S().Errorf("s.cache.Sub: %v", err)
-				continue
+				switch err.(type) {
+				case *net.OpError:
+					//timeout here
+					continue
+				default:
+					zap.S().Errorf("s.cache.Sub: %v", err)
+					continue
+				}
 			}
-
-			//unmarshal message and
-			var m model.ChatMessage
-			var n = time.Now()
-			err = json.Unmarshal([]byte(msg.Payload), &m)
-			if err != nil {
-				zap.S().Errorf("json.Unmarshal: %v", err)
-				continue
-			}
-			m.SendDtm = &n
-
-			//return message back if success
-			j, _ := json.Marshal(&m)
-			err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, j)
-			if err != nil {
-				_ = ss.Conn.Close()
-				return
-			}
-
-			//TODO insert data into chat_message db by using goroutine
+			s.writeServerMessage(ss, msg)
 		}
 	}
+}
 
+func (s service) writeServerMessage(ss *SsModel, msg interface{}) {
+	switch msg := msg.(type) {
+	case *redis.Message:
+		//unmarshal message and
+		var m model.ChatMessage
+		var n = time.Now()
+		err := json.Unmarshal([]byte(msg.Payload), &m)
+		if err != nil {
+			zap.S().Errorf("json.Unmarshal: %v", err)
+			return
+		}
+		m.SendDtm = &n
+
+		//return message back if success
+		j, _ := json.Marshal(&m)
+		err = wsutil.WriteServerMessage(ss.Conn, ws.OpText, j)
+		if err != nil {
+			_ = ss.Conn.Close()
+			return
+		}
+		s.saveMsg(m, n, true)
+	default:
+		//do nothing
+	}
+}
+
+func (s service) saveMsg(m model.ChatMessage, n time.Time, isRead bool) {
+	e := repository.MessageEntity{
+		ReceiverId: m.ReceiverId,
+		SenderId:   m.SenderId,
+		Message:    m.Msg,
+		IsRead:     isRead,
+		SendDtm:    &n,
+	}
+	if isRead {
+		now := time.Now()
+		e.ReadDtm = &now
+	}
+	err := s.messageRepo.Create(e)
+	if err != nil {
+		zap.S().Errorf("s.messageRepo.Create: %v", err)
+	}
 }
