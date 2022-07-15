@@ -295,7 +295,7 @@ func (s service) writeServerMessage(ss *SsModel, msg interface{}) {
 	}
 }
 
-func (s service) saveMsg(m model.ChatMessage, n time.Time, isRead bool) {
+func (s service) saveMsg(m model.ChatMessage, n time.Time, isRead bool) error {
 	e := repository.MessageEntity{
 		ReceiverId: m.ReceiverId,
 		SenderId:   m.SenderId,
@@ -304,11 +304,11 @@ func (s service) saveMsg(m model.ChatMessage, n time.Time, isRead bool) {
 		SendDtm:    &n,
 	}
 	if isRead {
-		now := time.Now()
-		e.ReadDtm = &now
+		e.ReadDtm = &n
 	}
 	err := s.messageRepo.Create(e)
 	if err != nil {
 		zap.S().Errorf("s.messageRepo.Create: %v", err)
 	}
+	return err
 }
